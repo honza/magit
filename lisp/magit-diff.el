@@ -1661,6 +1661,80 @@ the Magit-Status buffer for DIRECTORY."
               (throw 'found nil))))))
     (+ line offset)))
 
+;;;;; Modified
+
+
+(defun magit--current-diff-revs ()
+  (cond
+   ((derived-mode-p 'magit-diff-mode)
+    (cond
+     (magit-buffer-range
+      (magit-split-range magit-buffer-range))
+     ((equal magit-buffer-typearg "--cached")
+      (list "HEAD" "{index}" "--cached"))
+     (t
+      (list "HEAD" "{worktree}"))))
+   ))
+
+(defun magit-diff--modified-defuns ()
+  (pcase-let ((`(,from ,to ,arg)
+               (list "HEAD" "{worktree}" "--cached")
+               ;;(magit--current-diff-revs)
+               ))
+    (delete-consecutive-dups
+     (sort (cl-mapcan
+            (lambda (file)
+              (pcase-let ((`(,flines ,tlines)
+                           (magit-diff--modified-lines file arg)))
+                (nconc (magit-diff--modified-defuns-1 file flines from)
+                       (magit-diff--modified-defuns-1 file tlines to))))
+            (magit-git-items "diff" "-z" "--name-only"))
+           #'string<))))
+
+(defun magit-diff--modified-defuns-1 (file lines rev)
+  (when lines
+    (let* ((defuns nil)
+           (buffer (if (equal rev "{worktree}")
+                       (with-current-buffer (get-file-buffer file)
+                         (save-buffer)
+                         (current-buffer))
+                     (magit-get-revision-buffer rev file)))
+           (kill   (not buffer))
+           (buffer (cond (buffer)
+                         ((equal rev "{worktree}")
+                          (find-file-noselect file))
+                         (t (magit-find-file-noselect rev file)))))
+      (with-current-buffer buffer
+        (save-excursion
+          (dolist (line lines)
+            (goto-char (point-min))
+            (forward-line line)
+            (cl-pushnew (which-function)
+                        defuns :test #'equal))))
+      (when kill
+        (kill-buffer buffer))
+      defuns)))
+
+(defun magit-diff--modified-lines (file &rest args)
+  (let (flines tlines)
+    (with-temp-buffer
+      (save-excursion
+        (magit-with-toplevel
+          (magit-git-insert "diff" args "--" file)))
+      (while (re-search-forward
+              "^@@ -\\([0-9]+\\),[^ ]+ \\+\\([0-9]+\\),[^ ]+ @@.*\n" nil t)
+        (let ((fline (1- (string-to-number (match-string 1))))
+              (tline (1- (string-to-number (match-string 2)))))
+          (while (and (not (eobp))
+                      (memq (char-after) '(?\s ?- ?+)))
+            (pcase (char-after)
+              (?\s (cl-incf fline)
+                   (cl-incf tline))
+              (?-  (push (cl-incf fline) flines))
+              (?+  (push (cl-incf tline) tlines)))
+            (forward-line)))))
+    (list flines tlines)))
+
 ;;;; Scroll Commands
 
 (defun magit-diff-show-or-scroll-up ()
